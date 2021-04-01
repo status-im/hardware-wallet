@@ -3,9 +3,13 @@ package im.status.keycard;
 import javacard.framework.*;
 import javacard.security.*;
 
+import static javacard.framework.ISO7816.OFFSET_P2;
+
 public class CashApplet extends Applet {
   private static final short SIGN_OUT_OFF = ISO7816.OFFSET_CDATA + MessageDigest.LENGTH_SHA_256;
   private static final byte TLV_PUB_DATA = (byte) 0x82;
+  private static final byte SIGN_P2_ECDSA = 0x00;
+  private static final byte SIGN_P2_SCHNORR = 0x01;
 
   private KeyPair keypair;
   private ECPublicKey publicKey;
@@ -15,6 +19,7 @@ public class CashApplet extends Applet {
   private SECP256k1 secp256k1;
 
   private Signature signature;
+  private boolean schnorrInitialized;
 
   /**
    * Invoked during applet installation. Creates an instance of this class. The installation parameters are passed in
@@ -40,7 +45,7 @@ public class CashApplet extends Applet {
    */
   public CashApplet(byte[] bArray, short bOffset, byte bLength) {
     crypto = new Crypto();
-    secp256k1 = new SECP256k1();
+    secp256k1 = new SECP256k1(crypto);
 
     keypair = new KeyPair(KeyPair.ALG_EC_FP, SECP256k1.SECP256K1_KEY_SIZE);
     publicKey = (ECPublicKey) keypair.getPublic();
@@ -51,6 +56,7 @@ public class CashApplet extends Applet {
 
     signature = Signature.getInstance(Signature.ALG_ECDSA_SHA_256, false);
     signature.init(privateKey, Signature.MODE_SIGN);
+    schnorrInitialized = false;
 
     short c9Off = (short)(bOffset + bArray[bOffset] + 1); // Skip AID
     c9Off += (short)(bArray[c9Off] + 1); // Skip Privileges and parameter length
@@ -91,6 +97,11 @@ public class CashApplet extends Applet {
   }
 
   private void selectApplet(APDU apdu) {
+    if (!schnorrInitialized) {
+      secp256k1.initSchnorr();
+      schnorrInitialized = true;
+    }
+
     byte[] apduBuffer = apdu.getBuffer();
 
     short off = 0;
@@ -120,6 +131,20 @@ public class CashApplet extends Applet {
   private void sign(APDU apdu) {
     byte[] apduBuffer = apdu.getBuffer();
 
+    boolean schnorr;
+
+    switch(apduBuffer[OFFSET_P2]) {
+      case SIGN_P2_ECDSA:
+        schnorr = false;
+        break;
+      case SIGN_P2_SCHNORR:
+        schnorr = true;
+        break;
+      default:
+        ISOException.throwIt(ISO7816.SW_WRONG_P1P2);
+        return;
+    }
+
     apduBuffer[SIGN_OUT_OFF] = KeycardApplet.TLV_SIGNATURE_TEMPLATE;
     apduBuffer[(short) (SIGN_OUT_OFF + 3)] = KeycardApplet.TLV_PUB_KEY;
     short outLen = apduBuffer[(short) (SIGN_OUT_OFF + 4)] = Crypto.KEY_PUB_SIZE;
@@ -129,8 +154,12 @@ public class CashApplet extends Applet {
     outLen += 5;
     short sigOff = (short) (SIGN_OUT_OFF + outLen);
 
-    outLen += signature.signPreComputedHash(apduBuffer, ISO7816.OFFSET_CDATA, MessageDigest.LENGTH_SHA_256, apduBuffer, sigOff);
-    outLen += crypto.fixS(apduBuffer, sigOff);
+    if (schnorr) {
+      outLen += secp256k1.signSchnorr(privateKey, apduBuffer, (short) (SIGN_OUT_OFF + 5), apduBuffer, ISO7816.OFFSET_CDATA, MessageDigest.LENGTH_SHA_256, apduBuffer, sigOff);
+    } else {
+      outLen += signature.signPreComputedHash(apduBuffer, ISO7816.OFFSET_CDATA, MessageDigest.LENGTH_SHA_256, apduBuffer, sigOff);
+      outLen += crypto.fixS(apduBuffer, sigOff);
+    }
 
     apduBuffer[(short) (SIGN_OUT_OFF + 1)] = (byte) 0x81;
     apduBuffer[(short) (SIGN_OUT_OFF + 2)] = (byte) (outLen - 3);

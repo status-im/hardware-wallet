@@ -17,6 +17,8 @@ import org.bitcoinj.crypto.HDKeyDerivation;
 import org.bouncycastle.jce.ECNamedCurveTable;
 import org.bouncycastle.jce.spec.ECParameterSpec;
 import org.bouncycastle.jce.spec.ECPublicKeySpec;
+import org.bouncycastle.math.ec.ECCurve;
+import org.bouncycastle.math.ec.ECPoint;
 import org.bouncycastle.util.encoders.Hex;
 import org.junit.jupiter.api.*;
 import org.web3j.crypto.*;
@@ -1006,6 +1008,18 @@ public class KeycardTest {
     response = cmdSet.sign(hash);
     verifySignResp(data, response);
 
+    //TODO: Integrate in SDK!
+    // START SCHNORR
+    APDUCommand sign = secureChannel.protectedCommand(0x80, 0xC0, 0x00, 0x01, hash);
+    long time = System.currentTimeMillis();
+    response = secureChannel.transmit(sdkChannel, sign);
+    System.out.print("Schnorr time: ");
+    System.out.println(System.currentTimeMillis() - time);
+    response.checkOK();
+
+    verifySchnorr(hash, response.getData());
+    // END SCHNORR
+
     // Sign and derive
     String currentPath = new KeyPath(cmdSet.getStatus(KeycardCommandSet.GET_STATUS_P1_KEY_PATH).checkOK().getData()).toString();
     String updatedPath = new KeyPath(currentPath + "/2").toString();
@@ -1046,6 +1060,34 @@ public class KeycardTest {
 
     response = cmdSet.signPinless(hash);
     assertEquals(0x6A88, response.getSw());
+  }
+
+  private void verifySchnorr(byte[] m, byte[] sig) throws Exception {
+    byte[] p = extractPublicKeyFromSignature(sig);
+    byte[] rawSig = extractSignature(sig);
+
+    byte[] r = Arrays.copyOfRange(rawSig, 2, 67);
+    byte[] rawS = Arrays.copyOfRange(rawSig, 67, rawSig.length);
+
+    System.out.println("p = " + Hex.toHexString(p));
+    System.out.println("r = " + Hex.toHexString(r));
+    System.out.println("s = " + Hex.toHexString(rawS));
+
+    MessageDigest dg = MessageDigest.getInstance("SHA256");
+    dg.update(r);
+    dg.update(p);
+    dg.update(m);
+    BigInteger e = new BigInteger(1, dg.digest());
+
+    ECParameterSpec ecSpec = ECNamedCurveTable.getParameterSpec("secp256k1");
+    ECPoint P = ecSpec.getCurve().decodePoint(p);
+    ECPoint G = ecSpec.getG();
+
+    BigInteger s = new BigInteger(1, rawS);
+
+    ECPoint R = G.multiply(s).subtract(P.multiply(e));
+    System.out.println("R = " + Hex.toHexString(R.getEncoded(false)));
+    assertTrue(R.equals(ecSpec.getCurve().decodePoint(r)));
   }
 
   private void verifySignResp(byte[] data, APDUResponse response) throws Exception {
@@ -1375,6 +1417,18 @@ public class KeycardTest {
 
     response = cashCmdSet.sign(hash);
     verifySignResp(data, response);
+
+    //TODO: Integrate in SDK!
+    // START SCHNORR
+    APDUCommand sign = new APDUCommand(0x80, 0xC0, 0x00, 0x01, hash);
+    long time = System.currentTimeMillis();
+    response = sdkChannel.send(sign);
+    System.out.print("Schnorr time: ");
+    System.out.println(System.currentTimeMillis() - time);
+    response.checkOK();
+
+    verifySchnorr(hash, response.getData());
+    // END SCHNORR
   }
 
   @Test
